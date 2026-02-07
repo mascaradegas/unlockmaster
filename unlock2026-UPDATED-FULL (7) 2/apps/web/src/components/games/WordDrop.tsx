@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import type { Lesson, VocabularyItem } from '@unlock2026/shared';
 import { useProgressStore } from '@/stores/progressStore';
 import { SFX } from '@/utils/sounds';
-import { getDisplayAnswer, stripHtml } from '@/utils/matchAnswer';
+import { getDisplayAnswer } from '@/utils/matchAnswer';
 
 interface Props { lesson: Lesson; onFinish: () => void; }
 
@@ -20,7 +20,8 @@ export function WordDropGame({ lesson, onFinish }: Props) {
   const navigate = useNavigate();
   const store = useProgressStore();
   const vocab = lesson.vocabulary || [];
-  const words = useMemo(() => shuffle(vocab).slice(0, Math.min(15, vocab.length)), [vocab]);
+  const [gameKey, setGameKey] = useState(0);
+  const words = useMemo(() => shuffle(vocab).slice(0, Math.min(15, vocab.length)), [vocab, gameKey]);
   const startTime = useRef(Date.now());
   const answerStart = useRef(Date.now());
   const bestScore = store.getBestScore(lesson.id, 'word-drop');
@@ -33,6 +34,7 @@ export function WordDropGame({ lesson, onFinish }: Props) {
   const [correct, setCorrect] = useState(0);
   const [wrong, setWrong] = useState(0);
   const [fb, setFb] = useState<'correct'|'wrong'|null>(null);
+  const [selectedAnswer, setSelectedAnswer] = useState<string|null>(null);
   const [gameOver, setGameOver] = useState(false);
   const [victory, setVictory] = useState(false);
   const [options, setOptions] = useState<string[]>([]);
@@ -43,8 +45,11 @@ export function WordDropGame({ lesson, onFinish }: Props) {
   const [showTutorial, setShowTutorial] = useState(false);
   const [recordBeat, setRecordBeat] = useState(false);
   const [xpGained, setXpGained] = useState(0);
-  const [blockPosition, setBlockPosition] = useState(0); // Posição do bloco caindo (0-100%)
+  const [blockPosition, setBlockPosition] = useState(0);
   const lastMilestoneRef = useRef(0);
+
+  // Use ref to avoid stale closures in timer callback
+  const handleAnswerRef = useRef<(answer: string) => void>(() => {});
 
   const word = words[idx];
   const total = words.length;
@@ -57,7 +62,7 @@ export function WordDropGame({ lesson, onFinish }: Props) {
     const others = vocab.filter(v => getDisplayAnswer(v.en) !== ans).sort(() => Math.random() - 0.5).slice(0, 2).map(v => getDisplayAnswer(v.en));
     setOptions(shuffle([...others, ans]));
     setTimer(100);
-    setBlockPosition(0); // Resetar posição do bloco
+    setBlockPosition(0);
     answerStart.current = Date.now();
   }, [idx, word, vocab, gameOver]);
 
@@ -65,13 +70,12 @@ export function WordDropGame({ lesson, onFinish }: Props) {
     if (gameOver || paused || !word || fb || showTutorial) return;
     const iv = setInterval(() => {
       setTimer(p => {
-        if (p <= 0.5) { handleAnswer('__timeout__'); return 100; }
+        if (p <= 0.5) { handleAnswerRef.current('__timeout__'); return 100; }
         return p - 0.5;
       });
       setBlockPosition(p => {
-        // Bloco cai de 0 (topo) até 100 (chão)
         if (p >= 100) return 100;
-        return p + 0.5; // Mesma velocidade do timer
+        return p + 0.5;
       });
     }, 50);
     return () => clearInterval(iv);
@@ -100,13 +104,11 @@ export function WordDropGame({ lesson, onFinish }: Props) {
     const duration = Math.round((Date.now() - startTime.current) / 1000);
     const acc = totalCorrect + totalWrong > 0 ? Math.round((totalCorrect / (totalCorrect + totalWrong)) * 100) : 0;
     const maxScore = total * 10;
+    // completeGame already calls addXP, updateStreak, checkAchievements internally
     const result = store.completeGame(lesson.id, 'word-drop', finalScore, maxScore);
-    const xp = 50 + (acc === 100 ? 100 : 0);
-    store.addXP(xp);
     store.logSession({ type: 'word-drop', lessonId: lesson.id, score: finalScore, accuracy: acc, duration, wordsAttempted: totalCorrect + totalWrong });
-    store.updateStreak();
-    store.checkAchievements();
-    setXpGained(xp);
+    // XP display: GAME_COMPLETE (50) + GAME_PERFECT (100) if 100% accuracy
+    setXpGained(50 + (result.isPerfect ? 100 : 0));
     setRecordBeat(result.isNewBest);
     setVictory(won);
     setGameOver(true);
@@ -116,6 +118,7 @@ export function WordDropGame({ lesson, onFinish }: Props) {
   const handleAnswer = useCallback((answer: string) => {
     if (gameOver || fb) return;
     const ok = answer === getDisplayAnswer(word?.en || '');
+    setSelectedAnswer(answer);
     if (ok) {
       setFb('correct'); SFX.correct();
       const newCombo = combo + 1;
@@ -129,7 +132,7 @@ export function WordDropGame({ lesson, onFinish }: Props) {
       if (word) trackAnswer(word, true);
       if (newCombo >= 10 && combo < 10) setLives(l => Math.min(l + 1, 5));
       setTimeout(() => {
-        setFb(null);
+        setFb(null); setSelectedAnswer(null);
         if (idx >= total - 1) { finishGame(true, newScore, newCorrect, wrong); } else { setIdx(i => i + 1); }
       }, 800);
     } else {
@@ -141,12 +144,15 @@ export function WordDropGame({ lesson, onFinish }: Props) {
       setWrong(newWrong);
       if (word) trackAnswer(word, false);
       setTimeout(() => {
-        setFb(null);
+        setFb(null); setSelectedAnswer(null);
         if (newLives <= 0) { finishGame(false, score, correct, newWrong); return; }
         if (idx >= total - 1) { finishGame(true, score, correct, newWrong); } else { setIdx(i => i + 1); }
       }, 800);
     }
   }, [gameOver, fb, word, combo, score, lives, idx, total, correct, wrong, trackAnswer, finishGame]);
+
+  // Keep ref in sync so the timer interval always calls the latest handleAnswer
+  useEffect(() => { handleAnswerRef.current = handleAnswer; }, [handleAnswer]);
 
   // Keyboard
   useEffect(() => {
@@ -158,6 +164,14 @@ export function WordDropGame({ lesson, onFinish }: Props) {
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
   }, [gameOver, fb, options, handleAnswer, showTutorial, store]);
+
+  const resetGame = useCallback(() => {
+    setIdx(0); setScore(0); setLives(5); setCombo(0); setMaxCombo(0);
+    setCorrect(0); setWrong(0); setGameOver(false); setVictory(false);
+    setFb(null); setSelectedAnswer(null);
+    lastMilestoneRef.current = 0; startTime.current = Date.now();
+    setGameKey(k => k + 1);
+  }, []);
 
   // Tutorial
   if (showTutorial) {
@@ -190,21 +204,19 @@ export function WordDropGame({ lesson, onFinish }: Props) {
           ))}
         </div>
         <div className="game-xp-gained">+{xpGained} XP ⚡</div>
-        <button className="game-modal-btn primary" onClick={() => { setIdx(0);setScore(0);setLives(5);setCombo(0);setMaxCombo(0);setCorrect(0);setWrong(0);setGameOver(false);setVictory(false);lastMilestoneRef.current=0;startTime.current=Date.now(); }}>🔄 Jogar de Novo</button>
+        <button className="game-modal-btn primary" onClick={resetGame}>🔄 Jogar de Novo</button>
         <button className="game-modal-btn secondary" onClick={() => navigate(`/game/select/${lesson.id}`)}>🎯 Outros Jogos</button>
         <button className="game-modal-btn secondary" onClick={() => navigate('/')}>📚 Menu</button>
       </div></div>
     );
   }
 
-  const timerClass = timer > 50 ? '' : timer > 25 ? 'warn' : 'danger';
   const recordPct = bestScore > 0 ? Math.min((score / bestScore) * 100, 100) : 0;
-  
-  // Cores do bloco baseado no tempo restante
+
   const getBlockColor = () => {
-    if (timer > 50) return '#00ff00'; // Verde
-    if (timer > 25) return '#ffaa00'; // Amarelo
-    return '#ff0000'; // Vermelho
+    if (timer > 50) return '#00ff00';
+    if (timer > 25) return '#ffaa00';
+    return '#ff0000';
   };
 
   return (
@@ -219,13 +231,11 @@ export function WordDropGame({ lesson, onFinish }: Props) {
       {bestScore > 0 && (
         <div className="game-record-bar"><div className="game-record-fill" style={{width:`${recordPct}%`}}/><div className="game-record-text">Recorde: {bestScore}</div></div>
       )}
-      
-      {/* Área de blocos caindo - NOVO! */}
+
       <div className="word-drop-container">
         <div className="word-drop-track">
-          {/* Bloco caindo */}
           {!paused && !fb && (
-            <div 
+            <div
               className="falling-block"
               style={{
                 top: `${blockPosition}%`,
@@ -239,12 +249,11 @@ export function WordDropGame({ lesson, onFinish }: Props) {
               </div>
             </div>
           )}
-          
-          {/* Linha do chão */}
+
           <div className="ground-line" />
         </div>
       </div>
-      
+
       {milestone && <div className="milestone-alert" style={{color:milestone.color}}>{milestone.label}</div>}
       <div className={`game-arena-minimal ${shake ? 'arena-shake' : ''}`}>
         {paused && <div style={{fontFamily:'Orbitron',fontSize:'1.5rem',color:'var(--cyan)'}}>⏸️ PAUSADO</div>}
@@ -257,10 +266,11 @@ export function WordDropGame({ lesson, onFinish }: Props) {
       </div>
       <div className="game-options">
         {options.map((opt, i) => {
+          const correctAnswer = getDisplayAnswer(word?.en || '');
           let cls = 'game-opt-btn';
-          if (fb === 'correct' && opt === getDisplayAnswer(word?.en || '')) cls += ' correct';
-          else if (fb === 'wrong' && opt === getDisplayAnswer(word?.en || '')) cls += ' correct';
-          else if (fb === 'wrong' && opt !== getDisplayAnswer(word?.en || '')) cls += ' wrong';
+          if (fb === 'correct' && opt === correctAnswer) cls += ' correct';
+          else if (fb === 'wrong' && opt === correctAnswer) cls += ' correct';
+          else if (fb === 'wrong' && opt === selectedAnswer) cls += ' wrong';
           return <button key={i} className={cls} disabled={!!fb||paused} onClick={() => handleAnswer(opt)}><span className="opt-key">{i+1}</span>{opt}</button>;
         })}
       </div>
