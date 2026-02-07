@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import type { Lesson } from '@unlock2026/shared';
 import { useProgressStore } from '@/stores/progressStore';
 import { SFX } from '@/utils/sounds';
-import { isAnswerCorrect, getDisplayAnswer, stripHtml } from '@/utils/matchAnswer';
+import { getDisplayAnswer } from '@/utils/matchAnswer';
 
 interface Props { lesson: Lesson; onFinish: () => void; }
 
@@ -13,7 +13,8 @@ export function WordStackGame({ lesson, onFinish }: Props) {
   const navigate = useNavigate();
   const store = useProgressStore();
   const vocab = lesson.vocabulary || [];
-  const words = useMemo(() => shuffle(vocab).slice(0, Math.min(10, vocab.length)), [vocab]);
+  const [gameKey, setGameKey] = useState(0);
+  const words = useMemo(() => shuffle(vocab).slice(0, Math.min(10, vocab.length)), [vocab, gameKey]);
   const startTime = useRef(Date.now());
   const answerStart = useRef(Date.now());
   const bestScore = store.getBestScore(lesson.id, 'word-stack');
@@ -35,6 +36,9 @@ export function WordStackGame({ lesson, onFinish }: Props) {
   const [xpGained, setXpGained] = useState(0);
   const [recordBeat, setRecordBeat] = useState(false);
 
+  // Use ref to avoid stale closure in timer callback
+  const handleSubmitRef = useRef<(timeout?: boolean) => void>(() => {});
+
   const word = words[idx];
   const total = words.length;
 
@@ -53,12 +57,12 @@ export function WordStackGame({ lesson, onFinish }: Props) {
     answerStart.current = Date.now();
   }, [idx, word, gameOver]);
 
-  // Timer
+  // Timer - uses ref to avoid stale closure
   useEffect(() => {
     if (gameOver || paused || fb || showTutorial) return;
     const iv = setInterval(() => {
       setTimer(t => {
-        if (t <= 0.1) { handleSubmit(true); return 15; }
+        if (t <= 0.1) { handleSubmitRef.current(true); return 15; }
         return t - 0.1;
       });
     }, 100);
@@ -82,13 +86,10 @@ export function WordStackGame({ lesson, onFinish }: Props) {
     const duration = Math.round((Date.now() - startTime.current) / 1000);
     const totalAttempts = totalCorrect + totalWrong;
     const acc = totalAttempts > 0 ? Math.round((totalCorrect / totalAttempts) * 100) : 0;
+    // completeGame already calls addXP, updateStreak, checkAchievements internally
     const result = store.completeGame(lesson.id, 'word-stack', finalScore, total * 15);
-    const xp = 50 + (acc === 100 ? 100 : 0);
-    store.addXP(xp);
     store.logSession({ type: 'word-stack', lessonId: lesson.id, score: finalScore, accuracy: acc, duration, wordsAttempted: totalAttempts });
-    store.updateStreak();
-    store.checkAchievements();
-    setXpGained(xp);
+    setXpGained(50 + (result.isPerfect ? 100 : 0));
     setRecordBeat(result.isNewBest);
     setGameOver(true);
     if (totalCorrect > totalWrong) SFX.victory(); else SFX.gameover();
@@ -96,9 +97,10 @@ export function WordStackGame({ lesson, onFinish }: Props) {
 
   const handleSubmit = useCallback((timeout = false) => {
     if (fb || !word) return;
-    const answer = placed.join(' ').toLowerCase().trim();
-    const correct = word.en.toLowerCase().trim();
-    const isCorrect = isAnswerCorrect(answer, word.en);
+    const answer = placed.join(' ');
+    const expected = getDisplayAnswer(word.en);
+    // For word-stacking, use exact match since user taps pre-defined word tokens
+    const isCorrect = answer.toLowerCase().trim() === expected.toLowerCase().trim();
 
     // Track word
     store.trackWord({
@@ -135,6 +137,18 @@ export function WordStackGame({ lesson, onFinish }: Props) {
     }
   }, [fb, word, placed, combo, score, lives, idx, total, correctCount, wrongCount, store, lesson, finishGame]);
 
+  // Keep ref in sync so the timer always calls the latest handleSubmit
+  useEffect(() => { handleSubmitRef.current = handleSubmit; }, [handleSubmit]);
+
+  const resetGame = useCallback(() => {
+    setIdx(0); setScore(0); setLives(3); setCombo(0);
+    setCorrectCount(0); setWrongCount(0); setGameOver(false);
+    setFb(null); setShowCorrect(null); setPlaced([]); setPool([]);
+    setXpGained(0); setRecordBeat(false);
+    startTime.current = Date.now();
+    setGameKey(k => k + 1);
+  }, []);
+
   // Tutorial
   if (showTutorial) {
     return (
@@ -167,7 +181,7 @@ export function WordStackGame({ lesson, onFinish }: Props) {
           ))}
         </div>
         <div className="game-xp-gained">+{xpGained} XP ⚡</div>
-        <button className="game-modal-btn primary" onClick={() => window.location.reload()}>🔄 Jogar de Novo</button>
+        <button className="game-modal-btn primary" onClick={resetGame}>🔄 Jogar de Novo</button>
         <button className="game-modal-btn secondary" onClick={() => navigate(`/game/select/${lesson.id}`)}>🎯 Outros Jogos</button>
         <button className="game-modal-btn secondary" onClick={() => navigate('/')}>📚 Menu</button>
       </div></div>

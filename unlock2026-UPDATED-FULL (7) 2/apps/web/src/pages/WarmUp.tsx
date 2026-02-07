@@ -283,7 +283,7 @@ export function WarmUp() {
       const avgTime = times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : 0;
       logSession({
         type: mode === 'review' ? 'review' : 'warmup',
-        lessonId: lessonId || null,
+        lessonId: lessonId ?? undefined,
         score: correctCount,
         accuracy: items.length > 0 ? Math.round((correctCount / items.length) * 100) : 0,
         duration: Math.round((Date.now() - (startedAt - (times.reduce((a, b) => a + b, 0)))) / 1000),
